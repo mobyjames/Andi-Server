@@ -1,0 +1,12 @@
+/__pycache__
+/.DS_Store
+/.venv/
+/.env
+
+# Local runtime/debug artifacts
+/tmp_generate_audio/
+
+# Local Piper model binaries
+/piper_models/
+/en_US-hfc_female-medium.onnx.json
+/en_US-hfc_female-medium.onnx
