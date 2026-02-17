@@ -65,6 +65,12 @@ class GenerateRequest(BaseModel):
     audio: Optional[bool] = False
 
 
+class TtsRequest(BaseModel):
+    text: str
+    filename: Optional[str] = None
+    return_audio_base64: Optional[bool] = False
+
+
 def encode_wav_base64(float_pcm, sample_rate: int) -> str:
     import numpy as np
     import io
@@ -282,14 +288,20 @@ def load_piper():
     _piper_model_path = model_path
 
 
-def synthesize_with_piper(text: str) -> tuple[str, str]:
+def synthesize_with_piper(
+    text: str,
+    output_wav: Optional[str] = None,
+    include_base64: bool = True,
+    keep_file: bool = True,
+) -> tuple[Optional[str], str]:
     load_piper()
     temp_dir = os.path.join(os.getcwd(), "tmp_generate_audio")
     os.makedirs(temp_dir, exist_ok=True)
-    output_wav = os.path.join(
-        temp_dir,
-        f"piper_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}.wav",
-    )
+    if output_wav is None:
+        output_wav = os.path.join(
+            temp_dir,
+            f"piper_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}.wav",
+        )
 
     cmd = [_piper_binary, "--model", _piper_model_path, "--output_file", output_wav]
     if _piper_config_path:
@@ -306,9 +318,16 @@ def synthesize_with_piper(text: str) -> tuple[str, str]:
         stderr_text = proc.stderr.decode("utf-8", errors="ignore").strip()
         raise RuntimeError(f"Piper synthesis failed: {stderr_text or 'unknown error'}")
 
-    with open(output_wav, "rb") as f:
-        wav_bytes = f.read()
-    audio_base64 = base64.b64encode(wav_bytes).decode("ascii")
+    audio_base64 = None
+    if include_base64:
+        with open(output_wav, "rb") as f:
+            wav_bytes = f.read()
+        audio_base64 = base64.b64encode(wav_bytes).decode("ascii")
+    if not keep_file:
+        try:
+            os.remove(output_wav)
+        except OSError:
+            pass
     return audio_base64, output_wav
 
 
@@ -447,11 +466,46 @@ def runtime_info() -> dict:
     }
 
 
+def build_tts_output_path(filename: Optional[str]) -> str:
+    temp_dir = os.path.join(os.getcwd(), "tmp_generate_audio")
+    os.makedirs(temp_dir, exist_ok=True)
+    if not filename:
+        return os.path.join(
+            temp_dir,
+            f"piper_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}.wav",
+        )
+
+    safe_name = os.path.basename(filename.strip())
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="filename must not be empty.")
+    if not safe_name.lower().endswith(".wav"):
+        safe_name = f"{safe_name}.wav"
+    return os.path.join(temp_dir, safe_name)
+
+
 @app.on_event("startup")
 async def startup_load_models():
     print("[startup] Loading models...")
     load_llm()
     print(f"[startup] Text model loaded with runtime: {runtime_info()}")
+
+
+@app.post("/tts")
+async def tts(req: TtsRequest):
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="'text' is required.")
+
+    output_path = build_tts_output_path(req.filename)
+    audio_base64, wav_path = synthesize_with_piper(
+        text,
+        output_wav=output_path,
+        include_base64=bool(req.return_audio_base64),
+    )
+    response = {"file": wav_path, "mime": "audio/wav", "tts_backend": "piper"}
+    if req.return_audio_base64:
+        response["audio"] = audio_base64
+    return response
 
 
 @app.post("/generate")
@@ -533,10 +587,13 @@ async def generate(req: GenerateRequest):
 
     # TTS (Piper)
     try:
-        audio_base64, output_wav_path = synthesize_with_piper(generated_text)
+        audio_base64, _ = synthesize_with_piper(
+            generated_text,
+            include_base64=True,
+            keep_file=False,
+        )
         info["tts_backend"] = "piper"
         info["tts_model"] = os.path.basename(_piper_model_path) if _piper_model_path else "unknown"
-        info["tts_output_file"] = output_wav_path
         return {"text": generated_text, "audio": audio_base64, "mime": "audio/wav", "runtime": info}
     except Exception as e:
         info["tts_error"] = str(e)
