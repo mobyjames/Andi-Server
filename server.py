@@ -69,6 +69,7 @@ class TtsRequest(BaseModel):
     text: str
     filename: Optional[str] = None
     return_audio_base64: Optional[bool] = False
+    keep_file: Optional[bool] = True
 
 
 def encode_wav_base64(float_pcm, sample_rate: int) -> str:
@@ -492,6 +493,7 @@ async def startup_load_models():
 
 @app.post("/tts")
 async def tts(req: TtsRequest):
+    keep_file = True if req.keep_file is None else bool(req.keep_file)
     text = (req.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="'text' is required.")
@@ -501,6 +503,7 @@ async def tts(req: TtsRequest):
         text,
         output_wav=output_path,
         include_base64=bool(req.return_audio_base64),
+        keep_file=keep_file,
     )
     response = {"file": wav_path, "mime": "audio/wav", "tts_backend": "piper"}
     if req.return_audio_base64:
